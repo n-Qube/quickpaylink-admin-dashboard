@@ -1,0 +1,650 @@
+rules_version = '2';
+
+/**
+ * Firestore Security Rules for QuickLink Pay Super Admin Platform
+ *
+ * This file defines access control rules for all collections.
+ * Security principles:
+ * 1. Only authenticated admins can access data
+ * 2. Role-based access control (RBAC) enforced
+ * 3. Audit logs are immutable (write-once, read-many)
+ * 4. All sensitive operations require specific permissions
+ */
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============================================================================
+    // Helper Functions
+    // ============================================================================
+
+    /**
+     * Check if the user is authenticated
+     */
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    /**
+     * Check if the user is an admin
+     */
+    function isAdmin() {
+      return isAuthenticated() &&
+             exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    /**
+     * Get the current admin document
+     */
+    function getAdmin() {
+      return get(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    /**
+     * Check if admin has a specific access level
+     */
+    function hasAccessLevel(level) {
+      return isAdmin() && getAdmin().data.accessLevel == level;
+    }
+
+    /**
+     * Check if admin is a super admin
+     */
+    function isSuperAdmin() {
+      return hasAccessLevel('super_admin');
+    }
+
+    /**
+     * Check if admin is system admin or higher
+     */
+    function isSystemAdmin() {
+      return isSuperAdmin() || hasAccessLevel('system_admin');
+    }
+
+    /**
+     * Check if admin account is active
+     */
+    function isActiveAdmin() {
+      return isAdmin() && getAdmin().data.status == 'active';
+    }
+
+    /**
+     * Get the admin's role document
+     */
+    function getRole() {
+      return get(/databases/$(database)/documents/roles/$(getAdmin().data.roleId));
+    }
+
+    /**
+     * Check if admin has permission for a resource and action
+     */
+    function hasPermission(resource, action) {
+      return isActiveAdmin() &&
+             getRole().data.permissions[resource][action] == true;
+    }
+
+    /**
+     * Check if the admin is modifying their own document
+     */
+    function isSelf(adminId) {
+      return request.auth.uid == adminId;
+    }
+
+    /**
+     * Check if the admin is the manager of the target admin
+     */
+    function isManagerOf(targetAdminId) {
+      let targetAdmin = get(/databases/$(database)/documents/admins/$(targetAdminId));
+      return targetAdmin.data.managerId == request.auth.uid;
+    }
+
+    /**
+     * Check if admin can manage users
+     */
+    function canManageUsers() {
+      return isSuperAdmin() || hasPermission('userManagement', 'update');
+    }
+
+    /**
+     * Check if admin can create sub-users
+     */
+    function canCreateSubUsers() {
+      return isActiveAdmin() && getAdmin().data.canCreateSubUsers == true;
+    }
+
+    // ============================================================================
+    // System Configuration
+    // ============================================================================
+
+    match /systemConfig/{configId} {
+      // Anyone can read system config (for public settings like feature flags)
+      allow read: if isAdmin();
+
+      // Only super admin can modify system config
+      allow write: if isSuperAdmin() || hasPermission('systemConfig', 'write');
+    }
+
+    // ============================================================================
+    // Admins & Roles
+    // ============================================================================
+
+    match /admins/{adminId} {
+      // Read access:
+      // 1. Users can read their own document
+      // 2. Super admins can read any admin
+      // 3. Managers can read their subordinates (admins they created)
+      // 4. Admins with userManagement.read permission can read all admins
+      allow read: if isAuthenticated() && (
+        isSelf(adminId) ||
+        isSuperAdmin() ||
+        isManagerOf(adminId) ||
+        hasPermission('userManagement', 'read')
+      );
+
+      // Create access:
+      // 1. Super admin can create any admin
+      // 2. Admins with canCreateSubUsers permission can create subordinates
+      allow create: if isSuperAdmin() ||
+                      (canCreateSubUsers() && hasPermission('userManagement', 'create'));
+
+      // Update access:
+      // 1. Admins can update their own profile (limited fields)
+      // 2. Super admin can update any admin
+      // 3. Managers can update their subordinates
+      // 4. Admins with userManagement.update permission can update admins
+      allow update: if isActiveAdmin() && (
+        (isSelf(adminId) && onlyUpdatingProfile()) ||
+        isSuperAdmin() ||
+        (isManagerOf(adminId) && canManageUsers()) ||
+        hasPermission('userManagement', 'update')
+      );
+
+      // Delete access:
+      // 1. Super admin can delete any admin
+      // 2. Admins with userManagement.delete permission can delete admins they manage
+      allow delete: if isSuperAdmin() ||
+                      (hasPermission('userManagement', 'delete') && isManagerOf(adminId));
+
+      // Helper to check if only profile fields are being updated
+      function onlyUpdatingProfile() {
+        let allowedFields = ['profile', 'updatedAt'];
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowedFields);
+      }
+    }
+
+    match /roles/{roleId} {
+      // All admins can read roles to check permissions
+      // Special case: Allow read during initial setup when no roles exist
+      allow read: if isAdmin();
+
+      // Create roles:
+      // 1. Super admin can create any role
+      // 2. Admins with roleManagement.create permission can create custom roles
+      // 3. Special case: Allow admin with super_admin accessLevel to seed roles during initial setup
+      allow create: if (isAdmin() && hasAccessLevel('super_admin')) ||
+                      isSuperAdmin() ||
+                      hasPermission('roleManagement', 'create');
+
+      // Update roles:
+      // 1. Super admin can update any role
+      // 2. Admins with roleManagement.update permission can update custom roles (not system roles)
+      allow update: if (isAdmin() && hasAccessLevel('super_admin')) ||
+                      isSuperAdmin() ||
+                      (hasPermission('roleManagement', 'update') && !resource.data.isSystemRole);
+
+      // Delete roles:
+      // 1. Super admin can delete custom roles
+      // 2. Admins with roleManagement.delete permission can delete custom roles
+      // 3. System roles cannot be deleted
+      allow delete: if !resource.data.isSystemRole &&
+                      (isSuperAdmin() || hasPermission('roleManagement', 'delete'));
+    }
+
+    // ============================================================================
+    // Location Management
+    // ============================================================================
+
+    match /countries/{countryCode} {
+      allow read: if isAdmin();
+      allow write: if isSuperAdmin() || hasPermission('systemConfig', 'write');
+
+      // Regions subcollection
+      match /regions/{regionId} {
+        allow read: if isAdmin();
+        allow write: if isSuperAdmin() || hasPermission('systemConfig', 'write');
+      }
+
+      // Cities subcollection
+      match /cities/{cityId} {
+        allow read: if isAdmin();
+        allow write: if isSuperAdmin() || hasPermission('systemConfig', 'write');
+      }
+    }
+
+    // ============================================================================
+    // Currencies
+    // ============================================================================
+
+    match /currencies/{currencyCode} {
+      allow read: if isAdmin();
+      allow write: if hasPermission('systemConfig', 'write');
+    }
+
+    // ============================================================================
+    // Business Types
+    // ============================================================================
+
+    match /businessTypes/{businessTypeId} {
+      allow read: if isAdmin();
+      allow write: if hasPermission('systemConfig', 'write');
+    }
+
+    // ============================================================================
+    // Tax Rules
+    // ============================================================================
+
+    match /taxRules/{taxRuleId} {
+      allow read: if isAdmin();
+      allow write: if hasPermission('systemConfig', 'write');
+    }
+
+    // ============================================================================
+    // Subscription Plans & Pricing
+    // ============================================================================
+
+    match /subscriptionPlans/{planId} {
+      allow read: if isAdmin();
+      allow write: if hasPermission('pricing', 'write');
+    }
+
+    match /pricingRules/{ruleId} {
+      allow read: if isAdmin();
+      allow write: if hasPermission('pricing', 'write');
+    }
+
+    // ============================================================================
+    // Merchants
+    // ============================================================================
+
+    match /merchants/{merchantId} {
+      // Admins can read any merchant
+      // Merchants can read their own data
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && request.auth.uid == merchantId);
+
+      allow create: if hasPermission('merchantManagement', 'write');
+
+      // Admins can update any field
+      // Merchants can only update limited fields
+      allow update: if hasPermission('merchantManagement', 'write') ||
+                      (isAuthenticated() &&
+                       request.auth.uid == merchantId &&
+                       onlyUpdatingMerchantProfile());
+
+      // Delete requires explicit delete permission
+      allow delete: if isSuperAdmin() || hasPermission('merchantManagement', 'delete');
+
+      // Helper to check if merchant is only updating allowed profile fields
+      function onlyUpdatingMerchantProfile() {
+        let allowedFields = ['businessInfo', 'contactInfo', 'settings', 'updatedAt'];
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowedFields);
+      }
+
+      // KYC Documents subcollection
+      match /kycDocuments/{documentId} {
+        allow read: if isActiveAdmin();
+        allow write: if hasPermission('merchantManagement', 'write');
+      }
+
+      // Support Tickets subcollection
+      match /supportTickets/{ticketId} {
+        allow read: if isActiveAdmin();
+        allow write: if hasPermission('merchantManagement', 'write');
+      }
+
+      // Admin Notes subcollection
+      match /adminNotes/{noteId} {
+        allow read: if isActiveAdmin();
+        allow create: if isActiveAdmin();
+        // Can only update/delete own notes, or if super admin
+        allow update, delete: if isActiveAdmin() && (
+          resource.data.adminId == request.auth.uid ||
+          isSuperAdmin()
+        );
+      }
+    }
+
+    // ============================================================================
+    // API Integrations & Webhooks
+    // ============================================================================
+
+    match /apiIntegrations/{integrationId} {
+      allow read: if isActiveAdmin();
+      allow write: if hasPermission('apiManagement', 'write');
+    }
+
+    match /webhooks/{webhookId} {
+      allow read: if isActiveAdmin();
+      allow write: if hasPermission('apiManagement', 'write');
+    }
+
+    // ============================================================================
+    // Audit Logs (Immutable)
+    // ============================================================================
+
+    match /auditLogs/{logId} {
+      // All active admins can read audit logs
+      allow read: if isActiveAdmin();
+
+      // Only server-side writes allowed (Cloud Functions)
+      // Admins cannot create, update, or delete audit logs directly
+      allow write: if false;
+    }
+
+    // ============================================================================
+    // Alerts
+    // ============================================================================
+
+    match /alerts/{alertId} {
+      allow read: if isActiveAdmin();
+
+      // Can create alerts
+      allow create: if hasPermission('systemHealth', 'write');
+
+      // Can update to acknowledge or resolve
+      allow update: if isActiveAdmin() && (
+        hasPermission('systemHealth', 'write') ||
+        onlyAcknowledgingAlert()
+      );
+
+      allow delete: if isSuperAdmin();
+
+      function onlyAcknowledgingAlert() {
+        let allowedFields = ['status', 'acknowledgedBy', 'acknowledgedAt', 'updatedAt'];
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowedFields);
+      }
+    }
+
+    // ============================================================================
+    // Compliance Reports
+    // ============================================================================
+
+    match /complianceReports/{reportId} {
+      allow read: if isActiveAdmin();
+      allow create: if hasPermission('compliance', 'write');
+      allow update, delete: if hasPermission('compliance', 'write');
+    }
+
+    // ============================================================================
+    // System Metrics (Short-lived, TTL: 90 days)
+    // ============================================================================
+
+    match /systemMetrics/{metricId} {
+      allow read: if isActiveAdmin();
+
+      // Metrics are typically written by Cloud Functions
+      // But allow admins with permission to create them
+      allow create: if hasPermission('systemHealth', 'write');
+
+      // No updates or deletes - metrics are immutable
+      allow update, delete: if false;
+    }
+
+    // ============================================================================
+    // Maintenance Windows
+    // ============================================================================
+
+    match /maintenanceWindows/{windowId} {
+      allow read: if isAdmin();
+      allow write: if hasPermission('systemHealth', 'write');
+    }
+
+    // ============================================================================
+    // Email Templates
+    // ============================================================================
+
+    match /emailTemplates/{templateId} {
+      // Only super admins can manage email templates
+      allow read: if isSuperAdmin();
+      allow create: if isSuperAdmin();
+      allow update: if isSuperAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // ============================================================================
+    // WhatsApp Templates
+    // ============================================================================
+
+    match /whatsappTemplates/{templateId} {
+      // Only super admins can manage WhatsApp templates
+      allow read: if isSuperAdmin();
+      allow create: if isSuperAdmin();
+      allow update: if isSuperAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // ============================================================================
+    // Support Tickets
+    // ============================================================================
+
+    match /supportTickets/{ticketId} {
+      allow read: if isActiveAdmin() && (isSuperAdmin() || hasPermission('merchantManagement', 'read'));
+      allow create: if isActiveAdmin() && (isSuperAdmin() || hasPermission('merchantManagement', 'write'));
+      allow update: if isActiveAdmin() && (isSuperAdmin() || hasPermission('merchantManagement', 'write'));
+      allow delete: if isSuperAdmin();
+    }
+
+    // ============================================================================
+    // Payouts
+    // ============================================================================
+
+    match /payouts/{payoutId} {
+      allow read: if isActiveAdmin() && hasPermission('merchantManagement', 'read');
+      allow write: if isActiveAdmin() && hasPermission('merchantManagement', 'write');
+    }
+
+    // ============================================================================
+    // AI Prompt Templates
+    // ============================================================================
+
+    match /aiPromptTemplates/{templateId} {
+      // Only super admins can manage AI prompt templates
+      allow read: if isSuperAdmin();
+      allow create: if isSuperAdmin();
+      allow update: if isSuperAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // ============================================================================
+    // AI Usage Logs
+    // ============================================================================
+
+    match /aiUsageLogs/{logId} {
+      // Admins can read all logs
+      // Merchants can read their own logs
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Only server-side writes allowed (Cloud Functions)
+      allow write: if false;
+    }
+
+    // ============================================================================
+    // Email Logs
+    // ============================================================================
+
+    match /emailLogs/{logId} {
+      // Admins can read all logs
+      // Merchants can read their own logs
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Only server-side writes allowed
+      allow write: if false;
+    }
+
+    // ============================================================================
+    // WhatsApp Messages
+    // ============================================================================
+
+    match /whatsappMessages/{messageId} {
+      // Admins can read all messages
+      // Merchants can read their own messages
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Only server-side writes allowed
+      allow write: if false;
+    }
+
+    // ============================================================================
+    // Platform Features (Dynamic Feature Catalog)
+    // ============================================================================
+
+    match /platformFeatures/{featureId} {
+      // All admins can read platform features
+      allow read: if isAdmin();
+
+      // Only super admin can manage platform features
+      allow write: if isSuperAdmin();
+    }
+
+    // ============================================================================
+    // Merchant Collections (Invoices, Customers, Products, etc.)
+    // ============================================================================
+
+    match /invoices/{invoiceId} {
+      // Admins can read all invoices
+      // Merchants can read their own invoices
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Merchants can create invoices
+      allow create: if isAuthenticated() &&
+                      request.resource.data.merchantId == request.auth.uid;
+
+      // Merchants can update their own draft invoices
+      allow update: if isAuthenticated() &&
+                      resource.data.merchantId == request.auth.uid &&
+                      resource.data.status == 'draft';
+
+      // Merchants can delete their own draft invoices
+      allow delete: if isAuthenticated() &&
+                      resource.data.merchantId == request.auth.uid &&
+                      resource.data.status == 'draft';
+    }
+
+    match /customers/{customerId} {
+      // Admins can read all customers
+      // Merchants can read their own customers
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Merchants can create customers
+      allow create: if isAuthenticated() &&
+                      request.resource.data.merchantId == request.auth.uid;
+
+      // Merchants can update their own customers
+      allow update: if isAuthenticated() &&
+                      resource.data.merchantId == request.auth.uid;
+
+      // Merchants can delete their own customers
+      allow delete: if isAuthenticated() &&
+                      resource.data.merchantId == request.auth.uid;
+    }
+
+    match /products/{productId} {
+      // Admins can read all products
+      // Merchants can read their own products
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Merchants can create products
+      allow create: if isAuthenticated() &&
+                      request.resource.data.merchantId == request.auth.uid;
+
+      // Merchants can update their own products
+      allow update: if isAuthenticated() &&
+                      resource.data.merchantId == request.auth.uid;
+
+      // Merchants can delete their own products
+      allow delete: if isAuthenticated() &&
+                      resource.data.merchantId == request.auth.uid;
+    }
+
+    match /payments/{paymentId} {
+      // Admins can read all payments
+      // Merchants can read their own payments
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Merchants can create payments
+      allow create: if isAuthenticated() &&
+                      request.resource.data.merchantId == request.auth.uid;
+
+      // Payments are immutable after creation
+      allow update: if false;
+
+      // Only super admin can delete payments
+      allow delete: if isSuperAdmin();
+    }
+
+    match /teamMembers/{memberId} {
+      // Admins can read all team members
+      // Merchants can read their own team members
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Only merchant owners can manage team members
+      allow create, update, delete: if isActiveAdmin() ||
+                                      (isAuthenticated() &&
+                                       get(/databases/$(database)/documents/merchants/$(request.auth.uid)).data.role == 'owner');
+    }
+
+    match /notifications/{notificationId} {
+      // Admins can read all notifications
+      // Users can read their own notifications
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.userId == request.auth.uid);
+
+      // Users can only mark notifications as read
+      allow update: if isAuthenticated() &&
+                      resource.data.userId == request.auth.uid &&
+                      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'updatedAt']);
+
+      // Only server-side creates/deletes
+      allow create, delete: if false;
+    }
+
+    match /reports/{reportId} {
+      // Admins can read all reports
+      // Merchants can read their own reports
+      allow read: if isActiveAdmin() ||
+                    (isAuthenticated() && resource.data.merchantId == request.auth.uid);
+
+      // Merchants can create and update their own reports
+      allow create, update: if isAuthenticated() &&
+                              request.resource.data.merchantId == request.auth.uid;
+
+      // Merchants can delete their own reports
+      allow delete: if isAuthenticated() &&
+                      resource.data.merchantId == request.auth.uid;
+    }
+
+    // ============================================================================
+    // Update Merchants Collection to Allow Self-Access
+    // ============================================================================
+
+    // Note: The merchants collection rules above need to be updated
+    // This is handled by updating the existing merchants match above
+
+    // ============================================================================
+    // Default Deny All
+    // ============================================================================
+
+    // Deny all other paths by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

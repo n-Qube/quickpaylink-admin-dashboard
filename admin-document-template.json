@@ -1,0 +1,29 @@
+{
+  "adminId": "zCAdf8MV0kXxmty84zUH4rN7kQS2",
+  "email": "niinortey@n-qube.com",
+  "phoneNumber": "+233XXXXXXXXX",
+  "profile": {
+    "firstName": "Nii",
+    "lastName": "Nortey",
+    "displayName": "Nii Nortey",
+    "department": "Platform Operations"
+  },
+  "auth": {
+    "passwordHash": "managed_by_firebase_auth",
+    "twoFactorEnabled": false,
+    "loginCount": 0,
+    "failedLoginAttempts": 0
+  },
+  "roleId": "super_admin_role",
+  "permissions": ["*"],
+  "accessLevel": "super_admin",
+  "activeSessions": [],
+  "stats": {
+    "totalLogins": 0,
+    "totalActions": 0,
+    "merchantsManaged": 0
+  },
+  "status": "active",
+  "createdBy": "system_initialization",
+  "updatedBy": "system_initialization"
+}
