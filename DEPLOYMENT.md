@@ -1,209 +1,161 @@
-# Firebase Hosting Deployment Guide
+# Deployment Instructions
 
-This guide explains how to deploy your Admin Dashboard to Firebase Hosting.
+## Quick Deploy (Automated)
 
-## Prerequisites
+The easiest way to deploy is using the automated script:
 
-1. **Firebase CLI installed**
+```bash
+./deploy.sh
+```
+
+This script will:
+1. Build and deploy Cloud Functions
+2. Build and deploy the frontend
+3. Show you a summary of changes
+
+---
+
+## Manual Deployment
+
+If you prefer to deploy manually, follow these steps:
+
+### Prerequisites
+
+1. Install Firebase CLI (if not already installed):
    ```bash
    npm install -g firebase-tools
    ```
 
-2. **Firebase Authentication**
+2. Login to Firebase:
    ```bash
    firebase login
    ```
 
-## Deployment Methods
-
-### Method 1: Using NPM Scripts (Recommended)
+### Step 1: Deploy Cloud Functions
 
 ```bash
-# Build and deploy in one command
-npm run deploy
-```
+# Navigate to functions directory
+cd functions
 
-Or build and deploy separately:
-```bash
-# Build the app
+# Install dependencies
+npm install
+
+# Build TypeScript
 npm run build
 
-# Deploy only hosting
-npm run deploy:hosting
+# Go back to root
+cd ..
+
+# Deploy the new Cloud Function
+firebase deploy --only functions:testAPIIntegration
 ```
 
-### Method 2: Using the Shell Script
+### Step 2: Deploy Frontend
 
 ```bash
-# Make script executable (first time only)
-chmod +x deploy-hosting.sh
+# Install dependencies (if needed)
+npm install
 
-# Run the deployment script
-./deploy-hosting.sh
-```
-
-### Method 3: Manual Firebase CLI Commands
-
-```bash
-# Build the app
-npm run build
+# Build the frontend
+npx vite build
 
 # Deploy to Firebase Hosting
 firebase deploy --only hosting
 ```
 
-## Deployment Process
+### Step 3: Deploy Everything at Once (Optional)
 
-When you deploy, the following happens:
-
-1. **Build Process**
-   - TypeScript is compiled (`tsc -b`)
-   - Vite builds the production bundle
-   - Assets are optimized and minified
-   - Output is generated in the `dist/` folder
-
-2. **Firebase Hosting Upload**
-   - Files from `dist/` are uploaded to Firebase Hosting
-   - Cache headers are applied (configured in `firebase.json`)
-   - URL rewrites are set up for SPA routing
-
-## Your App URLs
-
-After deployment, your app will be available at:
-
-- **Primary URL**: https://quicklink-pay-admin.web.app
-- **Alternative URL**: https://quicklink-pay-admin.firebaseapp.com
-
-## Configuration Files
-
-### firebase.json
-```json
-{
-  "hosting": {
-    "public": "dist",           // Build output directory
-    "rewrites": [...],          // SPA routing support
-    "headers": [...]            // Cache control for assets
-  }
-}
-```
-
-### .firebaserc
-```json
-{
-  "projects": {
-    "default": "quicklink-pay-admin"
-  }
-}
-```
-
-## Deploy Specific Components
+If you want to deploy both functions and hosting together:
 
 ```bash
-# Deploy only hosting
-firebase deploy --only hosting
-
-# Deploy hosting and Firestore rules
-firebase deploy --only hosting,firestore:rules
-
-# Deploy everything
 firebase deploy
 ```
 
-## Preview Before Deploying
+---
 
-You can test the production build locally before deploying:
+## What Was Deployed
 
-```bash
-# Build the app
-npm run build
+### Cloud Function: `testAPIIntegration`
 
-# Preview locally
-npm run preview
-```
+- **Purpose**: Securely test API integrations from the admin dashboard
+- **Location**: `functions/src/index.ts` (line 851)
+- **Features**:
+  - Admin-only access
+  - Supports all providers: Paystack, Stripe, Flutterwave, Google Gemini, Google Maps, 360Dialog, SendGrid, and Custom APIs
+  - Server-side execution (no CORS issues)
+  - Keeps API keys secure
 
-This will serve the production build at `http://localhost:4173`
+### Frontend Updates
 
-## Rollback a Deployment
-
-If something goes wrong, you can rollback to a previous version:
-
-1. Go to Firebase Console → Hosting
-2. Select your site
-3. Click on "Release history"
-4. Find the previous version
-5. Click the three dots menu → "Rollback to this release"
-
-Or use CLI:
-```bash
-firebase hosting:rollback
-```
-
-## Environment Variables
-
-For production deployment, make sure your Firebase config in `src/lib/firebase.ts` uses the correct production Firebase project credentials.
-
-## Continuous Deployment (Optional)
-
-To set up automatic deployments when you push to GitHub:
-
-1. Install GitHub Action:
-   ```bash
-   firebase init hosting:github
-   ```
-
-2. This creates `.github/workflows/firebase-hosting-merge.yml`
-3. Every push to main branch will trigger a deployment
-
-## Troubleshooting
-
-### Build Fails
-- Check for TypeScript errors: `npm run lint`
-- Ensure all dependencies are installed: `npm install`
-
-### Deployment Fails
-- Verify you're logged in: `firebase login`
-- Check your Firebase project: `firebase projects:list`
-- Verify project ID in `.firebaserc`
-
-### App Not Loading After Deploy
-- Check browser console for errors
-- Verify Firebase config in `src/lib/firebase.ts`
-- Check Firestore security rules
-
-## Performance Optimization
-
-The current `firebase.json` includes:
-
-- **Cache Headers**: Static assets cached for 1 year
-- **SPA Rewrites**: All routes serve `index.html`
-- **Asset Optimization**: Vite handles code splitting and minification
-
-## Security Considerations
-
-1. **Firestore Rules**: Ensure your `firestore.rules` are properly configured
-2. **Authentication**: The app requires Firebase Authentication
-3. **CORS**: Configure if accessing from custom domains
-4. **Environment Variables**: Never commit sensitive keys to Git
-
-## Monitoring
-
-After deployment, monitor your app:
-
-1. **Firebase Console**: Check hosting metrics
-2. **Browser DevTools**: Monitor network requests
-3. **Firebase Performance Monitoring**: (Optional) Add for detailed metrics
-
-## Cost Considerations
-
-Firebase Hosting free tier includes:
-- 10 GB storage
-- 360 MB/day bandwidth
-- Custom domain support
-
-For higher traffic, check Firebase pricing: https://firebase.google.com/pricing
+- **File**: `src/pages/APIManagement.tsx`
+- **Change**: Now calls Cloud Function instead of direct API requests
+- **Benefits**:
+  - No more network/CORS errors
+  - Secure API key handling
+  - Better error messages
 
 ---
 
-**Need Help?**
-- Firebase Hosting Docs: https://firebase.google.com/docs/hosting
-- Firebase CLI Reference: https://firebase.google.com/docs/cli
+## Testing the Fix
+
+After deployment:
+
+1. Open your admin dashboard
+2. Navigate to **API Management** page
+3. Find any API integration
+4. Click the **Test** button (▶️ icon)
+5. You should see:
+   - ✓ Connection successful message (if API key is valid)
+   - Or clear error message if there's an issue
+
+---
+
+## Troubleshooting
+
+### "Not authenticated with Firebase"
+
+Run:
+```bash
+firebase login
+```
+
+### "Permission denied" error
+
+Make sure you have admin access to the Firebase project:
+```bash
+firebase projects:list
+```
+
+### "Function deployment failed"
+
+1. Check that functions are built:
+   ```bash
+   cd functions && npm run build
+   ```
+
+2. Check Firebase Functions quota/billing
+
+### "Frontend build errors"
+
+Use Vite directly to skip TypeScript checks:
+```bash
+npx vite build
+```
+
+---
+
+## Project Information
+
+- **Project ID**: quicklink-pay-admin
+- **Dashboard URL**: https://quicklink-pay-admin.web.app
+- **Functions Region**: us-central1 (default)
+
+---
+
+## Need Help?
+
+If you encounter issues during deployment:
+
+1. Check Firebase Console for deployment status
+2. Review function logs: `firebase functions:log`
+3. Check hosting status: `firebase hosting:channel:list`
