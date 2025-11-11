@@ -9,8 +9,9 @@
  */
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
+import { db, functions } from '@/lib/firebase';
 import { collection, getDocs, doc, setDoc, deleteDoc, serverTimestamp, query, orderBy, where } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   Plus,
@@ -402,149 +403,30 @@ export default function APIManagement() {
     setTestResult(null);
 
     try {
-      // Determine test endpoint based on provider
-      let testEndpoint = '';
-      let testMethod = 'GET';
-      let headers: Record<string, string> = {};
+      // Call the Cloud Function to test the API integration
+      const testFunction = httpsCallable(functions, 'testAPIIntegration');
+      const result = await testFunction({ integrationId: integration.integrationId });
 
-      switch (integration.provider) {
-        case 'PAYSTACK':
-          // Paystack uses same endpoint for both test and live modes, just different API keys
-          testEndpoint = 'https://api.paystack.co/bank';
-          headers = {
-            'Authorization': `Bearer ${integration.apiKey}`,
-            'Content-Type': 'application/json',
-          };
-          break;
+      const data = result.data as { success: boolean; message: string; data?: any };
 
-        case 'GOOGLE_GEMINI':
-          // Google Gemini API - list available models
-          testEndpoint = `https://generativelanguage.googleapis.com/v1beta/models?key=${integration.apiKey}`;
-          testMethod = 'GET';
-          headers = {
-            'Content-Type': 'application/json',
-          };
-          break;
-
-        case 'GOOGLE_MAPS':
-          // Google Maps API - geocoding test with a simple address
-          testEndpoint = `https://maps.googleapis.com/maps/api/geocode/json?address=1600+Amphitheatre+Parkway,+Mountain+View,+CA&key=${integration.apiKey}`;
-          testMethod = 'GET';
-          headers = {
-            'Content-Type': 'application/json',
-          };
-          break;
-
-        case 'FLUTTERWAVE':
-          testEndpoint = integration.environment === 'SANDBOX'
-            ? 'https://api.flutterwave.com/v3/banks/NG'
-            : 'https://api.flutterwave.com/v3/banks/NG';
-          headers = {
-            'Authorization': `Bearer ${integration.apiKey}`,
-            'Content-Type': 'application/json',
-          };
-          break;
-
-        case 'STRIPE':
-          testEndpoint = 'https://api.stripe.com/v1/balance';
-          headers = {
-            'Authorization': `Bearer ${integration.apiKey}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          };
-          break;
-
-        case 'DIALOG_360':
-          // 360Dialog WhatsApp Business API - test by getting webhook config
-          testEndpoint = 'https://waba.360dialog.io/v1/configs/webhook';
-          testMethod = 'GET';
-          headers = {
-            'D360-API-KEY': integration.apiKey,
-            'Content-Type': 'application/json',
-          };
-          break;
-
-        case 'SENDGRID':
-          // SendGrid Email API - test by checking API key validity
-          testEndpoint = 'https://api.sendgrid.com/v3/scopes';
-          testMethod = 'GET';
-          headers = {
-            'Authorization': `Bearer ${integration.apiKey}`,
-            'Content-Type': 'application/json',
-          };
-          break;
-
-        case 'CUSTOM':
-          // For custom integrations, use the baseUrl if available
-          if (!integration.config?.baseUrl) {
-            setTestResult({
-              integrationId: integration.integrationId,
-              success: false,
-              message: 'No base URL configured for custom integration',
-            });
-            setTestingIntegration(null);
-            return;
-          }
-
-          // Check if this is 360Dialog (WhatsApp Business API)
-          if (integration.config.baseUrl.includes('360dialog')) {
-            testEndpoint = `${integration.config.baseUrl}/v1/configs/webhook`;
-            testMethod = 'GET';
-            headers = {
-              'D360-API-KEY': integration.apiKey,
-              'Content-Type': 'application/json',
-            };
-          } else {
-            // Generic custom API test
-            testEndpoint = `${integration.config.baseUrl}/health`;
-            headers = {
-              'Authorization': `Bearer ${integration.apiKey}`,
-              'Content-Type': 'application/json',
-            };
-          }
-          break;
-      }
-
-      // Make the test request
-      const response = await fetch(testEndpoint, {
-        method: testMethod,
-        headers,
-        signal: AbortSignal.timeout(integration.config?.timeout || 30000),
+      setTestResult({
+        integrationId: integration.integrationId,
+        success: data.success,
+        message: data.success ? `✓ ${data.message}` : `✗ ${data.message}`,
+        data: data.data,
       });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        setTestResult({
-          integrationId: integration.integrationId,
-          success: true,
-          message: `✓ Connection successful! API is responding correctly.`,
-          data: {
-            status: response.status,
-            statusText: response.statusText,
-            provider: integration.provider,
-            environment: integration.environment,
-          },
-        });
-      } else {
-        setTestResult({
-          integrationId: integration.integrationId,
-          success: false,
-          message: `✗ API returned error: ${data.message || response.statusText}`,
-          data: {
-            status: response.status,
-            error: data,
-          },
-        });
-      }
     } catch (error: any) {
       let errorMessage = 'Connection failed';
 
-      if (error.name === 'TimeoutError') {
-        errorMessage = 'Request timed out. Check your network connection.';
-      } else if (error.message.includes('Failed to fetch')) {
-        errorMessage = 'Network error. Check if the API endpoint is reachable.';
-      } else {
-        errorMessage = error.message || 'Unknown error occurred';
+      // Handle Firebase Functions errors
+      if (error.code === 'unauthenticated') {
+        errorMessage = 'You must be logged in to test API integrations.';
+      } else if (error.code === 'permission-denied') {
+        errorMessage = 'You do not have permission to test API integrations.';
+      } else if (error.code === 'not-found') {
+        errorMessage = 'API integration not found.';
+      } else if (error.message) {
+        errorMessage = error.message;
       }
 
       setTestResult({

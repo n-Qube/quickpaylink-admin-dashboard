@@ -21,6 +21,7 @@ import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
 import { getAuth, type Auth } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 import { getStorage, type FirebaseStorage } from 'firebase/storage';
+import { getFunctions, type Functions } from 'firebase/functions';
 
 // Firebase configuration
 const firebaseConfig = {
@@ -57,6 +58,7 @@ let app: FirebaseApp;
 let auth: Auth;
 let db: Firestore;
 let storage: FirebaseStorage;
+let functions: Functions;
 
 try {
   validateConfig();
@@ -74,6 +76,7 @@ try {
   auth = getAuth(app);
   db = getFirestore(app);
   storage = getStorage(app);
+  functions = getFunctions(app);
 
   // Configure Firestore settings for better performance
   console.log('✅ Firebase services initialized');
@@ -90,7 +93,7 @@ try {
 }
 
 // Export Firebase services
-export { app, auth, db, storage };
+export { app, auth, db, storage, functions };
 
 // Export helper functions
 export const isFirebaseConfigured = () => {

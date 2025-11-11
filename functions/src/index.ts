@@ -839,3 +839,198 @@ export {
   migrateSystemSecrets,
   verifyMigrationStatus,
 } from './migration/migrateApiKeys';
+
+// ============================================================================
+// API Integration Testing
+// ============================================================================
+
+/**
+ * Test API integration connectivity (Admin only)
+ * This function is called from the admin dashboard to test API integrations
+ */
+export const testAPIIntegration = functions.https.onCall(async (data, context) => {
+  try {
+    // Check authentication
+    if (!context.auth) {
+      throw new functions.https.HttpsError(
+        'unauthenticated',
+        'Must be authenticated to test API integrations'
+      );
+    }
+
+    // Verify the caller is an admin
+    const adminDoc = await getDb().collection('admins').doc(context.auth.uid).get();
+    if (!adminDoc.exists) {
+      throw new functions.https.HttpsError(
+        'permission-denied',
+        'Only admins can test API integrations'
+      );
+    }
+
+    const { integrationId } = data;
+
+    if (!integrationId) {
+      throw new functions.https.HttpsError(
+        'invalid-argument',
+        'Integration ID is required'
+      );
+    }
+
+    // Get integration details from Firestore
+    const integrationDoc = await getDb().collection('apiIntegrations').doc(integrationId).get();
+
+    if (!integrationDoc.exists) {
+      throw new functions.https.HttpsError(
+        'not-found',
+        'API integration not found'
+      );
+    }
+
+    const integration = integrationDoc.data();
+
+    if (!integration) {
+      throw new functions.https.HttpsError(
+        'not-found',
+        'API integration data is empty'
+      );
+    }
+
+    // Determine test endpoint based on provider
+    let testEndpoint = '';
+    let testMethod = 'GET';
+    const headers: Record<string, string> = {};
+
+    switch (integration.provider) {
+      case 'PAYSTACK':
+        testEndpoint = 'https://api.paystack.co/bank';
+        headers['Authorization'] = `Bearer ${integration.apiKey}`;
+        headers['Content-Type'] = 'application/json';
+        break;
+
+      case 'GOOGLE_GEMINI':
+        testEndpoint = `https://generativelanguage.googleapis.com/v1beta/models?key=${integration.apiKey}`;
+        headers['Content-Type'] = 'application/json';
+        break;
+
+      case 'GOOGLE_MAPS':
+        testEndpoint = `https://maps.googleapis.com/maps/api/geocode/json?address=1600+Amphitheatre+Parkway,+Mountain+View,+CA&key=${integration.apiKey}`;
+        headers['Content-Type'] = 'application/json';
+        break;
+
+      case 'FLUTTERWAVE':
+        testEndpoint = 'https://api.flutterwave.com/v3/banks/NG';
+        headers['Authorization'] = `Bearer ${integration.apiKey}`;
+        headers['Content-Type'] = 'application/json';
+        break;
+
+      case 'STRIPE':
+        testEndpoint = 'https://api.stripe.com/v1/balance';
+        headers['Authorization'] = `Bearer ${integration.apiKey}`;
+        headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        break;
+
+      case 'DIALOG_360':
+        testEndpoint = 'https://waba.360dialog.io/v1/configs/webhook';
+        headers['D360-API-KEY'] = integration.apiKey;
+        headers['Content-Type'] = 'application/json';
+        break;
+
+      case 'SENDGRID':
+        testEndpoint = 'https://api.sendgrid.com/v3/scopes';
+        headers['Authorization'] = `Bearer ${integration.apiKey}`;
+        headers['Content-Type'] = 'application/json';
+        break;
+
+      case 'CUSTOM':
+        if (!integration.config?.baseUrl) {
+          throw new functions.https.HttpsError(
+            'failed-precondition',
+            'No base URL configured for custom integration'
+          );
+        }
+
+        if (integration.config.baseUrl.includes('360dialog')) {
+          testEndpoint = `${integration.config.baseUrl}/v1/configs/webhook`;
+          headers['D360-API-KEY'] = integration.apiKey;
+          headers['Content-Type'] = 'application/json';
+        } else {
+          testEndpoint = `${integration.config.baseUrl}/health`;
+          headers['Authorization'] = `Bearer ${integration.apiKey}`;
+          headers['Content-Type'] = 'application/json';
+        }
+        break;
+
+      default:
+        throw new functions.https.HttpsError(
+          'invalid-argument',
+          `Unsupported provider: ${integration.provider}`
+        );
+    }
+
+    // Make the test request with timeout
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, integration.config?.timeout || 30000);
+
+    try {
+      const response = await fetch(testEndpoint, {
+        method: testMethod,
+        headers,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      const responseData = await response.json();
+
+      if (response.ok) {
+        return {
+          success: true,
+          message: 'Connection successful! API is responding correctly.',
+          data: {
+            status: response.status,
+            statusText: response.statusText,
+            provider: integration.provider,
+            environment: integration.environment,
+          },
+        };
+      } else {
+        return {
+          success: false,
+          message: `API returned error: ${responseData.message || response.statusText}`,
+          data: {
+            status: response.status,
+            error: responseData,
+          },
+        };
+      }
+    } catch (fetchError: any) {
+      clearTimeout(timeout);
+
+      let errorMessage = 'Connection failed';
+
+      if (fetchError.name === 'AbortError') {
+        errorMessage = 'Request timed out. Check your network connection.';
+      } else if (fetchError.message?.includes('fetch')) {
+        errorMessage = 'Network error. Check if the API endpoint is reachable.';
+      } else {
+        errorMessage = fetchError.message || 'Unknown error occurred';
+      }
+
+      return {
+        success: false,
+        message: errorMessage,
+        data: {
+          error: fetchError.message,
+        },
+      };
+    }
+  } catch (error: any) {
+    console.error('Error testing API integration:', error);
+    throw new functions.https.HttpsError(
+      'internal',
+      error.message || 'Failed to test API integration'
+    );
+  }
+});
