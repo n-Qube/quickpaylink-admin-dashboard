@@ -234,3 +234,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 **Repository**: https://github.com/n-Qube/quickpaylink-admin-dashboard
 
 Made with ❤️ by the QuickLink Pay Team
+# Test CI/CD
+
+This triggers GitHub Actions
